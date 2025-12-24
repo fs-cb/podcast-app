@@ -115,6 +115,7 @@
             const [isConnected, setIsConnected] = useState(false);
             const [stopwatchTime, setStopwatchTime] = useState(0);
             const [isRunning, setIsRunning] = useState(false);
+            const [startTime, setStartTime] = useState(null);
             const [promptMessage, setPromptMessage] = useState('');
             const [messageInput, setMessageInput] = useState('');
             const [inputSessionId, setInputSessionId] = useState('');
@@ -183,11 +184,13 @@
                             // サーバー時刻ベースの計算
                             if (data.isRunning && data.startTime) {
                                 startTimeRef.current = data.startTime;
+                                setStartTime(data.startTime);
                                 const elapsed = Date.now() - data.startTime;
                                 setStopwatchTime(elapsed);
                             } else if (!data.isRunning && data.stopwatchTime !== undefined) {
                                 setStopwatchTime(data.stopwatchTime);
                                 startTimeRef.current = null;
+                                setStartTime(null);
                             }
                             
                             setLastUpdate(new Date().toLocaleTimeString());
@@ -209,20 +212,26 @@
 
             // ストップウォッチのローカル更新（表示のみ）
             useEffect(() => {
-                if (isRunning && startTimeRef.current) {
-                    // ローカルで表示を更新（バックグラウンドでも動作）
-                    timerIntervalRef.current = setInterval(() => {
-                        const elapsed = Date.now() - startTimeRef.current;
-                        setStopwatchTime(elapsed);
-                    }, 10);
-                    
-                    return () => {
-                        if (timerIntervalRef.current) {
-                            clearInterval(timerIntervalRef.current);
-                        }
-                    };
+                // 既存のタイマーを必ず解除
+                if (timerIntervalRef.current) {
+                    clearInterval(timerIntervalRef.current);
+                    timerIntervalRef.current = null;
                 }
-            }, [isRunning]);
+
+                // startTime が入っている間はローカルで表示を更新（ステージ側は放置しても動く）
+                if (isRunning && startTime != null) {
+                    timerIntervalRef.current = setInterval(() => {
+                        setStopwatchTime(Date.now() - startTime);
+                    }, 100);
+                }
+
+                return () => {
+                    if (timerIntervalRef.current) {
+                        clearInterval(timerIntervalRef.current);
+                        timerIntervalRef.current = null;
+                    }
+                };
+            }, [isRunning, startTime]);
 
             // セッション接続
             const connectToSession = async () => {
@@ -248,10 +257,13 @@
                             
                             if (data.isRunning && data.startTime) {
                                 startTimeRef.current = data.startTime;
+                                setStartTime(data.startTime);
                                 const elapsed = Date.now() - data.startTime;
                                 setStopwatchTime(elapsed);
                             } else {
                                 setStopwatchTime(data.stopwatchTime || 0);
+                                startTimeRef.current = null;
+                                setStartTime(null);
                             }
                             
                             debugLog("✅ 既存セッションに接続成功");
@@ -301,6 +313,7 @@
                 const newStartTime = now - currentElapsed;
                 
                 startTimeRef.current = newStartTime;
+                setStartTime(newStartTime);
                 setIsRunning(true);
                 
                 if (sessionRef.current) {
@@ -320,6 +333,8 @@
                 debugLog("⏸️ ストップウォッチ停止");
                 setIsRunning(false);
                 startTimeRef.current = null;
+                setStartTime(null);
+                setStartTime(null);
                 
                 if (sessionRef.current) {
                     sessionRef.current.update({
