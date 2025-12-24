@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ポッドキャスト収録アプリ（デバッグ版）</title>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        #root { width: 100%; height: 100vh; }
+        #debug-log {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 0, 0, 0.9);
+            color: #0f0;
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            border-top: 2px solid #0f0;
+            z-index: 9999;
+            display: none;
+        }
+        #debug-log.show {
+            display: block;
+        }
+        #debug-toggle {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 255, 0, 0.2);
+            color: #0f0;
+            border: 2px solid #0f0;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 10000;
+        }
+        #debug-toggle:hover {
+            background: rgba(0, 255, 0, 0.3);
+        }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <button id="debug-toggle" onclick="document.getElementById('debug-log').classList.toggle('show'); this.textContent = document.getElementById('debug-log').classList.contains('show') ? '🐛 ログ非表示' : '🐛 ログ表示';">🐛 ログ表示</button>
+    <div id="debug-log"></div>
+
+    <script>
+        // デバッグログ関数
+        function debugLog(message) {
+            const logDiv = document.getElementById('debug-log');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML = `[${timestamp}] ${message}<br>` + logDiv.innerHTML;
+            console.log(`[${timestamp}] ${message}`);
+        }
+    </script>
+
+    <script type="text/babel">
+        // ⚠️ ここにFirebaseの設定を貼り付けてください
+		const firebaseConfig = {
+		  apiKey: "AIzaSyDR3QRyEMQTu1EZyx3Tqa0cUH2eIuwO-ss",
+		  authDomain: "podcast-console-app.firebaseapp.com",
+		  databaseURL: "https://podcast-console-app-default-rtdb.asia-southeast1.firebasedatabase.app",
+		  projectId: "podcast-console-app",
+		  storageBucket: "podcast-console-app.firebasestorage.app",
+		  messagingSenderId: "356790709172",
+		  appId: "1:356790709172:web:7a82c41b8629ae3c3060e1"
+		};
+
+        debugLog("🚀 アプリ起動");
+
+        // Firebase初期化
+        let database = null;
+        let isFirebaseConfigured = false;
+
+        try {
+            if (firebaseConfig.apiKey !== "YOUR_API_KEY") {
+                debugLog("🔄 Firebase初期化中...");
+                firebase.initializeApp(firebaseConfig);
+                database = firebase.database();
+                isFirebaseConfigured = true;
+                debugLog("✅ Firebase接続成功");
+            } else {
+                debugLog("⚠️ Firebase設定が未入力です");
+            }
+        } catch (error) {
+            debugLog("❌ Firebase初期化エラー: " + error.message);
+            console.error(error);
+        }
+
+        const { useState, useEffect, useRef } = React;
+
+        const PodcastApp = () => {
+            const [mode, setMode] = useState(null);
+            const [sessionId, setSessionId] = useState('');
+            const [isConnected, setIsConnected] = useState(false);
+            const [stopwatchTime, setStopwatchTime] = useState(0);
+            const [isRunning, setIsRunning] = useState(false);
+            const [promptMessage, setPromptMessage] = useState('');
+            const [messageInput, setMessageInput] = useState('');
+            const [inputSessionId, setInputSessionId] = useState('');
+            const [currentTime, setCurrentTime] = useState('');
+            const [connectionStatus, setConnectionStatus] = useState('disconnected');
+            const [lastUpdate, setLastUpdate] = useState('未接続');
+            const sessionRef = useRef(null);
+            const startTimeRef = useRef(null); // ストップウォッチの開始時刻
+            const timerIntervalRef = useRef(null);
+
+            const presetMessages = [
+                '次へ進めてください',
+                '時間が押しています',
+                'まとめに入ってください',
+                '素晴らしいです！',
+                '深掘りしてください'
+            ];
+
+            // 現在時刻の更新
+            useEffect(() => {
+                const updateTime = () => {
+                    const now = new Date();
+                    const hours = String(now.getHours()).padStart(2, '0');
+                    const minutes = String(now.getMinutes()).padStart(2, '0');
+                    setCurrentTime(`${hours}:${minutes}`);
+                };
+                updateTime();
+                const interval = setInterval(updateTime, 1000);
+                return () => clearInterval(interval);
+            }, []);
+
+            // Firebaseセッションデータの監視
+            useEffect(() => {
+                if (!isFirebaseConfigured || !isConnected || !sessionId || !database) {
+                    debugLog("⏸️ Firebase監視停止（未接続）");
+                    return;
+                }
+
+                debugLog(`📡 セッション ${sessionId} の監視開始 (${mode}モード)`);
+                const sessionPath = `sessions/${sessionId}`;
+                sessionRef.current = database.ref(sessionPath);
+
+                // 接続状態の監視
+                const connectedRef = database.ref('.info/connected');
+                const connectedListener = connectedRef.on('value', (snapshot) => {
+                    if (snapshot.val() === true) {
+                        setConnectionStatus('connected');
+                        debugLog("🟢 Firebase接続: オンライン");
+                    } else {
+                        setConnectionStatus('disconnected');
+                        debugLog("🔴 Firebase接続: オフライン");
+                    }
+                });
+
+                // セッションデータの監視
+                const dataListener = sessionRef.current.on('value', (snapshot) => {
+                    const data = snapshot.val();
+                    debugLog(`📥 データ受信: ${JSON.stringify(data)}`);
+                    
+                    if (data) {
+                        // ステージモードまたはディレクターモードで受信時に状態を更新
+                        if (mode === 'stage' || (mode === 'director' && data.startTime !== undefined)) {
+                            setIsRunning(data.isRunning || false);
+                            setPromptMessage(data.promptMessage || '');
+                            
+                            // サーバー時刻ベースの計算
+                            if (data.isRunning && data.startTime) {
+                                startTimeRef.current = data.startTime;
+                                const elapsed = Date.now() - data.startTime;
+                                setStopwatchTime(elapsed);
+                            } else if (!data.isRunning && data.stopwatchTime !== undefined) {
+                                setStopwatchTime(data.stopwatchTime);
+                                startTimeRef.current = null;
+                            }
+                            
+                            setLastUpdate(new Date().toLocaleTimeString());
+                            debugLog(`✅ 状態更新 - 実行中: ${data.isRunning}, メッセージ: "${data.promptMessage}"`);
+                        }
+                    } else {
+                        debugLog("⚠️ セッションデータが空です");
+                    }
+                });
+
+                return () => {
+                    debugLog("🛑 Firebase監視停止");
+                    if (sessionRef.current) {
+                        sessionRef.current.off('value', dataListener);
+                    }
+                    connectedRef.off('value', connectedListener);
+                };
+            }, [isConnected, sessionId, mode]);
+
+            // ストップウォッチのローカル更新（表示のみ）
+            useEffect(() => {
+                if (isRunning && startTimeRef.current) {
+                    // ローカルで表示を更新（バックグラウンドでも動作）
+                    timerIntervalRef.current = setInterval(() => {
+                        const elapsed = Date.now() - startTimeRef.current;
+                        setStopwatchTime(elapsed);
+                    }, 10);
+                    
+                    return () => {
+                        if (timerIntervalRef.current) {
+                            clearInterval(timerIntervalRef.current);
+                        }
+                    };
+                }
+            }, [isRunning]);
+
+            // セッション接続
+            const connectToSession = async () => {
+                if (inputSessionId.length >= 4) {
+                    if (!isFirebaseConfigured) {
+                        alert("⚠️ Firebase設定が必要です。HTMLファイル内のfirebaseConfigを更新してください。");
+                        debugLog("❌ Firebase未設定のため接続失敗");
+                        return;
+                    }
+
+                    debugLog(`🔗 セッション ${inputSessionId} に接続試行...`);
+                    setSessionId(inputSessionId);
+                    setIsConnected(true);
+
+                    // 既存データを読み込み
+                    try {
+                        const snapshot = await database.ref(`sessions/${inputSessionId}`).once('value');
+                        const data = snapshot.val();
+                        debugLog(`📖 既存データ読み込み: ${JSON.stringify(data)}`);
+                        if (data) {
+                            setIsRunning(data.isRunning || false);
+                            setPromptMessage(data.promptMessage || '');
+                            
+                            if (data.isRunning && data.startTime) {
+                                startTimeRef.current = data.startTime;
+                                const elapsed = Date.now() - data.startTime;
+                                setStopwatchTime(elapsed);
+                            } else {
+                                setStopwatchTime(data.stopwatchTime || 0);
+                            }
+                            
+                            debugLog("✅ 既存セッションに接続成功");
+                        } else {
+                            debugLog("⚠️ 新規セッションです（データなし）");
+                        }
+                    } catch (error) {
+                        debugLog(`❌ データ読み込みエラー: ${error.message}`);
+                        console.error("データ読み込みエラー:", error);
+                    }
+                }
+            };
+
+            // 新規セッション作成
+            const createNewSession = () => {
+                if (!isFirebaseConfigured) {
+                    alert("⚠️ Firebase設定が必要です。HTMLファイル内のfirebaseConfigを更新してください。");
+                    debugLog("❌ Firebase未設定のため作成失敗");
+                    return;
+                }
+
+                const newId = Math.floor(1000 + Math.random() * 9000).toString();
+                debugLog(`🆕 新規セッション作成: ${newId}`);
+                setInputSessionId(newId);
+                setSessionId(newId);
+                setIsConnected(true);
+
+                // 初期データを作成
+                database.ref(`sessions/${newId}`).set({
+                    stopwatchTime: 0,
+                    isRunning: false,
+                    promptMessage: '',
+                    startTime: null,
+                    createdAt: Date.now()
+                }).then(() => {
+                    debugLog(`✅ セッション ${newId} のデータ初期化完了`);
+                }).catch(err => {
+                    debugLog(`❌ セッション作成エラー: ${err.message}`);
+                });
+            };
+
+            // ストップウォッチ操作
+            const handleStart = () => {
+                debugLog("▶️ ストップウォッチ開始");
+                const now = Date.now();
+                const currentElapsed = stopwatchTime;
+                const newStartTime = now - currentElapsed;
+                
+                startTimeRef.current = newStartTime;
+                setIsRunning(true);
+                
+                if (sessionRef.current) {
+                    sessionRef.current.update({
+                        isRunning: true,
+                        startTime: newStartTime,
+                        lastUpdate: now
+                    }).then(() => {
+                        debugLog("✅ 開始コマンド送信成功");
+                    }).catch(err => {
+                        debugLog(`❌ 開始コマンドエラー: ${err.message}`);
+                    });
+                }
+            };
+
+            const handlePause = () => {
+                debugLog("⏸️ ストップウォッチ停止");
+                setIsRunning(false);
+                startTimeRef.current = null;
+                
+                if (sessionRef.current) {
+                    sessionRef.current.update({
+                        isRunning: false,
+                        stopwatchTime: stopwatchTime,
+                        startTime: null,
+                        lastUpdate: Date.now()
+                    }).then(() => {
+                        debugLog("✅ 停止コマンド送信成功");
+                    }).catch(err => {
+                        debugLog(`❌ 停止コマンドエラー: ${err.message}`);
+                    });
+                }
+            };
+
+            const handleReset = () => {
+                debugLog("🔄 ストップウォッチリセット");
+                setStopwatchTime(0);
+                setIsRunning(false);
+                startTimeRef.current = null;
+                
+                if (sessionRef.current) {
+                    sessionRef.current.update({
+                        stopwatchTime: 0,
+                        isRunning: false,
+                        startTime: null,
+                        lastUpdate: Date.now()
+                    }).then(() => {
+                        debugLog("✅ リセットコマンド送信成功");
+                    }).catch(err => {
+                        debugLog(`❌ リセットコマンドエラー: ${err.message}`);
+                    });
+                }
+            };
+
+            // メッセージ送信
+            const sendMessage = (message) => {
+                debugLog(`📨 メッセージ送信: "${message}"`);
+                setPromptMessage(message);
+                if (sessionRef.current) {
+                    sessionRef.current.update({
+                        promptMessage: message,
+                        lastUpdate: Date.now()
+                    }).then(() => {
+                        debugLog("✅ メッセージ送信成功");
+                    }).catch(err => {
+                        debugLog(`❌ メッセージ送信エラー: ${err.message}`);
+                    });
+                }
+            };
+
+            const handleSendCustomMessage = () => {
+                if (messageInput.trim()) {
+                    sendMessage(messageInput);
+                    setMessageInput('');
+                }
+            };
+
+            const handleClearMessage = () => {
+                debugLog("🗑️ メッセージクリア");
+                setPromptMessage('');
+                if (sessionRef.current) {
+                    sessionRef.current.update({
+                        promptMessage: '',
+                        lastUpdate: Date.now()
+                    }).then(() => {
+                        debugLog("✅ クリアコマンド送信成功");
+                    }).catch(err => {
+                        debugLog(`❌ クリアコマンドエラー: ${err.message}`);
+                    });
+                }
+            };
+
+            // ストップウォッチの表示フォーマット
+            const formatStopwatch = (ms) => {
+                const totalSeconds = Math.floor(ms / 1000);
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+                return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            };
+
+            const styles = {
+                container: {
+                    minHeight: '100vh',
+                    backgroundColor: '#000',
+                    color: '#fff',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '32px',
+                    paddingBottom: '32px'
+                },
+                button: {
+                    padding: '32px 64px',
+                    fontSize: '24px',
+                    fontWeight: 'bold',
+                    borderRadius: '12px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    margin: '12px',
+                    color: '#fff'
+                },
+                input: {
+                    backgroundColor: '#1f2937',
+                    color: '#fff',
+                    fontSize: '24px',
+                    textAlign: 'center',
+                    padding: '16px 24px',
+                    borderRadius: '8px',
+                    border: '2px solid #4b5563',
+                    outline: 'none',
+                    margin: '12px 0'
+                }
+            };
+
+            // Firebase未設定の警告
+            if (!isFirebaseConfigured) {
+                return (
+                    <div style={styles.container}>
+                        <div style={{maxWidth: '800px', textAlign: 'center'}}>
+                            <h1 style={{fontSize: '48px', marginBottom: '24px'}}>⚠️ Firebase設定が必要です</h1>
+                            <div style={{backgroundColor: '#1f2937', padding: '32px', borderRadius: '12px', textAlign: 'left', marginBottom: '24px'}}>
+                                <p style={{fontSize: '20px', marginBottom: '16px'}}>HTMLファイル内の以下の部分を更新してください：</p>
+                                <pre style={{backgroundColor: '#111827', padding: '16px', borderRadius: '8px', overflow: 'auto', fontSize: '14px'}}>
+{`const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT.firebaseio.com",
+  projectId: "YOUR_PROJECT",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};`}
+                                </pre>
+                            </div>
+                            <p style={{fontSize: '18px', color: '#9ca3af'}}>
+                                Firebase Consoleから設定情報を取得して、<br/>
+                                YOUR_XXX の部分を実際の値に置き換えてください。
+                            </p>
+                        </div>
+                    </div>
+                );
+            }
+
+            // モード選択画面
+            if (!mode) {
+                return (
+                    <div style={styles.container}>
+                        <h1 style={{fontSize: '48px', fontWeight: 'bold', marginBottom: '16px'}}>ポッドキャスト収録アプリ</h1>
+                        <p style={{fontSize: '24px', color: '#9ca3af', marginBottom: '48px'}}>どちらの画面を使いますか？</p>
+                        <div style={{display: 'flex', gap: '24px'}}>
+                            <button onClick={() => { setMode('director'); debugLog("🎬 ディレクターモード選択"); }} style={{...styles.button, backgroundColor: '#2563eb'}}>
+                                🎬 ディレクター画面<br/>
+                                <span style={{fontSize: '16px', fontWeight: 'normal'}}>( PC・操作側)</span>
+                            </button>
+                            <button onClick={() => { setMode('stage'); debugLog("📺 ステージモード選択"); }} style={{...styles.button, backgroundColor: '#16a34a'}}>
+                                📺 ステージ画面<br/>
+                                <span style={{fontSize: '16px', fontWeight: 'normal'}}>(iPad・表示側)</span>
+                            </button>
+                        </div>
+                        <p style={{color: '#6b7280', marginTop: '48px', textAlign: 'center', maxWidth: '800px'}}>
+                            💡 デバッグログが画面下部に表示されます
+                        </p>
+                    </div>
+                );
+            }
+
+            // ステージモード - 接続前
+            if (mode === 'stage' && !isConnected) {
+                return (
+                    <div style={styles.container}>
+                        <button onClick={() => setMode(null)} style={{position: 'absolute', top: '16px', left: '16px', background: 'none', border: 'none', color: '#9ca3af', fontSize: '20px', cursor: 'pointer'}}>
+                            ← 戻る
+                        </button>
+                        <div style={{textAlign: 'center'}}>
+                            <h1 style={{fontSize: '40px', fontWeight: 'bold', marginBottom: '32px'}}>ステージ画面</h1>
+                            <p style={{fontSize: '24px', marginBottom: '32px'}}>セッションIDを入力してください</p>
+                            <input
+                                type="text"
+                                value={inputSessionId}
+                                onChange={(e) => setInputSessionId(e.target.value)}
+                                placeholder="例: 1234"
+                                style={{...styles.input, fontSize: '32px', width: '256px'}}
+                                maxLength="6"
+                            />
+                            <br />
+                            <button onClick={connectToSession} style={{...styles.button, backgroundColor: '#16a34a', fontSize: '24px'}}>
+                                接続
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            // ステージモード - メイン画面
+            if (mode === 'stage' && isConnected) {
+                return (
+                    <div style={{minHeight: '100vh', backgroundColor: '#000', color: '#fff', display: 'flex', flexDirection: 'column', padding: '32px', paddingBottom: '32px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px'}}>
+                            <div style={{fontSize: '64px', fontWeight: 'bold'}}>{currentTime}</div>
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px'}}>
+                                <div style={{display: 'flex', alignItems: 'center', gap: '12px'}}>
+                                    <div style={{width: '12px', height: '12px', backgroundColor: connectionStatus === 'connected' ? '#22c55e' : '#ef4444', borderRadius: '50%'}} className={connectionStatus === 'connected' ? 'pulse' : ''}></div>
+                                    <span style={{fontSize: '20px', color: '#9ca3af'}}>ID: {sessionId}</span>
+                                </div>
+                                <span style={{fontSize: '14px', color: '#6b7280'}}>最終更新: {lastUpdate}</span>
+                            </div>
+                        </div>
+                        <div style={{flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '32px'}}>
+                            <div style={{textAlign: 'center'}}>
+                                <div style={{fontSize: '144px', fontWeight: 'bold', letterSpacing: '0.05em', marginBottom: '16px'}}>
+                                    {formatStopwatch(stopwatchTime)}
+                                </div>
+                                <div style={{fontSize: '32px', color: '#9ca3af'}}>
+                                    {isRunning ? '🔴 収録中' : '⏸️ 一時停止'}
+                                </div>
+                            </div>
+                        </div>
+                        <div style={{backgroundColor: '#111827', borderRadius: '16px', padding: '48px', minHeight: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '4px solid #374151'}}>
+                            {promptMessage ? (
+                                <p style={{fontSize: '48px', fontWeight: 'bold', textAlign: 'center', lineHeight: '1.6'}}>
+                                    {promptMessage}
+                                </p>
+                            ) : (
+                                <p style={{fontSize: '32px', color: '#4b5563'}}>カンペ待機中...</p>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            // ディレクターモード - 接続前
+            if (mode === 'director' && !isConnected) {
+                return (
+                    <div style={styles.container}>
+                        <button onClick={() => setMode(null)} style={{position: 'absolute', top: '16px', left: '16px', background: 'none', border: 'none', color: '#9ca3af', fontSize: '20px', cursor: 'pointer'}}>
+                            ← 戻る
+                        </button>
+                        <div style={{textAlign: 'center', maxWidth: '448px'}}>
+                            <h1 style={{fontSize: '40px', fontWeight: 'bold', marginBottom: '32px'}}>ディレクター画面</h1>
+                            <div style={{marginBottom: '32px'}}>
+                                <button onClick={createNewSession} style={{...styles.button, backgroundColor: '#16a34a', width: '100%'}}>
+                                    新規セッション作成
+                                </button>
+                            </div>
+                            <div style={{borderTop: '2px solid #374151', paddingTop: '32px'}}>
+                                <p style={{fontSize: '20px', marginBottom: '16px'}}>既存セッションに接続</p>
+                                <input
+                                    type="text"
+                                    value={inputSessionId}
+                                    onChange={(e) => setInputSessionId(e.target.value)}
+                                    placeholder="セッションID"
+                                    style={{...styles.input, width: '100%'}}
+                                    maxLength="6"
+                                />
+                                <button onClick={connectToSession} style={{...styles.button, backgroundColor: '#2563eb', width: '100%', padding: '12px 32px'}}>
+                                    接続
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // ディレクターモード - メイン画面
+            return (
+                <div style={{minHeight: '100vh', backgroundColor: '#000', color: '#fff', padding: '32px', paddingBottom: '32px'}}>
+                    <div style={{maxWidth: '1024px', margin: '0 auto'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px', paddingBottom: '16px', borderBottom: '2px solid #374151'}}>
+                            <div>
+                                <h1 style={{fontSize: '32px', fontWeight: 'bold'}}>ディレクター画面</h1>
+                                <p style={{fontSize: '20px', color: '#9ca3af', marginTop: '8px'}}>セッションID: {sessionId}</p>
+                                <p style={{fontSize: '14px', color: '#6b7280', marginTop: '4px'}}>最終更新: {lastUpdate}</p>
+                            </div>
+                            <div style={{display: 'flex', alignItems: 'center', gap: '12px'}}>
+                                <div style={{width: '16px', height: '16px', backgroundColor: connectionStatus === 'connected' ? '#22c55e' : '#ef4444', borderRadius: '50%'}} className={connectionStatus === 'connected' ? 'pulse' : ''}></div>
+                                <span style={{fontSize: '20px'}}>{connectionStatus === 'connected' ? '接続中' : '切断'}</span>
+                            </div>
+                        </div>
+
+                        <div style={{backgroundColor: '#111827', borderRadius: '12px', padding: '24px', marginBottom: '24px', border: '2px solid #374151'}}>
+                            <h2 style={{fontSize: '24px', fontWeight: 'bold', marginBottom: '16px'}}>ストップウォッチ</h2>
+                            <div style={{fontSize: '64px', fontWeight: 'bold', marginBottom: '24px', textAlign: 'center'}}>
+                                {formatStopwatch(stopwatchTime)}
+                            </div>
+                            <div style={{display: 'flex', gap: '16px'}}>
+                                <button onClick={handleStart} disabled={isRunning} style={{flex: 1, fontSize: '20px', padding: '16px 24px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: isRunning ? 'not-allowed' : 'pointer', backgroundColor: isRunning ? '#374151' : '#16a34a', color: '#fff'}}>
+                                    ▶️ 開始
+                                </button>
+                                <button onClick={handlePause} disabled={!isRunning} style={{flex: 1, fontSize: '20px', padding: '16px 24px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: !isRunning ? 'not-allowed' : 'pointer', backgroundColor: !isRunning ? '#374151' : '#eab308', color: '#fff'}}>
+                                    ⏸️ 停止
+                                </button>
+                                <button onClick={handleReset} style={{flex: 1, backgroundColor: '#dc2626', fontSize: '20px', padding: '16px 24px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: 'pointer', color: '#fff'}}>
+                                    🔄 リセット
+                                </button>
+                            </div>
+                        </div>
+
+                        <div style={{backgroundColor: '#111827', borderRadius: '12px', padding: '24px', border: '2px solid #374151'}}>
+                            <h2 style={{fontSize: '24px', fontWeight: 'bold', marginBottom: '16px'}}>カンペメッセージ送信</h2>
+                            
+                            {promptMessage && (
+                                <div style={{backgroundColor: '#1e3a8a', border: '2px solid #2563eb', borderRadius: '8px', padding: '16px', marginBottom: '16px'}}>
+                                    <p style={{fontSize: '14px', color: '#d1d5db', marginBottom: '4px'}}>現在表示中:</p>
+                                    <p style={{fontSize: '20px', fontWeight: 'bold'}}>{promptMessage}</p>
+                                </div>
+                            )}
+
+                            <div style={{display: 'flex', gap: '12px', marginBottom: '16px'}}>
+                                <input
+                                    type="text"
+                                    value={messageInput}
+                                    onChange={(e) => setMessageInput(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSendCustomMessage()}
+                                    placeholder="カスタムメッセージを入力..."
+                                    style={{flex: 1, backgroundColor: '#1f2937', color: '#fff', fontSize: '18px', padding: '12px 16px', borderRadius: '8px', border: '2px solid #4b5563', outline: 'none'}}
+                                />
+                                <button onClick={handleSendCustomMessage} style={{backgroundColor: '#2563eb', fontSize: '18px', padding: '12px 32px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: 'pointer', color: '#fff'}}>
+                                    📤 送信
+                                </button>
+                                <button onClick={handleClearMessage} style={{backgroundColor: '#374151', fontSize: '18px', padding: '12px 32px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: 'pointer', color: '#fff'}}>
+                                    🗑️ クリア
+                                </button>
+                            </div>
+
+                            <div>
+                                <p style={{fontSize: '14px', color: '#9ca3af', marginBottom: '12px'}}>プリセットメッセージ:</p>
+                                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px'}}>
+                                    {presetMessages.map((msg, idx) => (
+                                        <button
+                                            key={idx}
+                                            onClick={() => sendMessage(msg)}
+                                            style={{backgroundColor: '#1f2937', textAlign: 'left', padding: '12px 16px', borderRadius: '8px', border: '2px solid #4b5563', cursor: 'pointer', color: '#fff', fontSize: '16px'}}
+                                        >
+                                            {msg}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<PodcastApp />, document.getElementById('root'));
+    </script>
+</body>
+</html>
